@@ -1,0 +1,842 @@
+-- 44S Duel - UI MOBILE OPTIMIZED (Clean Version)
+-- Fonctionnalités : Auto Grab | TP Left | TP Right | Anti Ragdoll
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
+local CoreGui = game:GetService("CoreGui")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ============================================================
+-- CONFIGURATION
+-- ============================================================
+local Config = {
+    AutoGrabEnabled = false,
+    AutoGrabRadius = 25,
+
+    AntiRagdollEnabled = false,
+}
+
+-- ============================================================
+-- VARIABLES
+-- ============================================================
+local ScreenGui = nil
+
+local AutoGrabConnection = nil
+local AutoGrabScanThread = nil
+local CachedGrabbables = {}
+
+local ToggleFunctions = {}
+
+-- Connections Anti Ragdoll (version Hub)
+local Connections = {}
+
+-- ============================================================
+-- FONCTIONS DE BASE
+-- ============================================================
+local function GetCharacter() return LocalPlayer.Character end
+local function GetHumanoid()
+    local char = GetCharacter()
+    return char and char:FindFirstChildOfClass("Humanoid")
+end
+local function GetRootPart()
+    local char = GetCharacter()
+    return char and char:FindFirstChild("HumanoidRootPart")
+end
+
+-- ============================================================
+-- AUTO GRAB
+-- ============================================================
+local CHUNK_SIZE = 200
+local function ScanGrabbables()
+    local allDesc = workspace:GetDescendants()
+    local results = {}
+    for i = 1, #allDesc do
+        local desc = allDesc[i]
+        if desc:IsA("ProximityPrompt") then
+            local part = desc.Parent
+            if part then
+                if part:IsA("BasePart") then
+                    results[#results + 1] = { type = "prompt", prompt = desc, part = part }
+                elseif part:IsA("Attachment") and part.Parent and part.Parent:IsA("BasePart") then
+                    results[#results + 1] = { type = "prompt", prompt = desc, part = part.Parent }
+                end
+            end
+        elseif desc:IsA("Tool") then
+            local parent = desc.Parent
+            if parent and not parent:FindFirstChildOfClass("Humanoid") and not parent:IsA("Backpack") then
+                local handle = desc:FindFirstChild("Handle")
+                if handle and handle:IsA("BasePart") then
+                    results[#results + 1] = { type = "tool", tool = desc, part = handle }
+                end
+            end
+        end
+        if i % CHUNK_SIZE == 0 then task.wait() end
+    end
+    CachedGrabbables = results
+end
+
+local function StartAutoGrabScan()
+    if AutoGrabScanThread then return end
+    AutoGrabScanThread = task.spawn(function()
+        while Config.AutoGrabEnabled do pcall(ScanGrabbables) task.wait(0.8) end
+        AutoGrabScanThread = nil
+    end)
+end
+
+local function StartAutoGrab()
+    if AutoGrabConnection then AutoGrabConnection:Disconnect() end
+    StartAutoGrabScan()
+    local grabCooldown = 0
+    AutoGrabConnection = RunService.Heartbeat:Connect(function()
+        if not Config.AutoGrabEnabled then return end
+        local char = GetCharacter(); local rootPart = GetRootPart(); local humanoid = GetHumanoid()
+        if not char or not rootPart or not humanoid then return end
+        if tick() - grabCooldown < 0.3 then return end
+        if char:FindFirstChildOfClass("Tool") then return end
+        local radius = Config.AutoGrabRadius
+        local myPos = rootPart.Position
+        local closestDist = radius + 1
+        local closestItem = nil
+        for _, item in ipairs(CachedGrabbables) do
+            if item.part and item.part.Parent then
+                local ok, dist = pcall(function() return (item.part.Position - myPos).Magnitude end)
+                if ok and dist and dist < closestDist then
+                    if item.type == "prompt" and item.prompt and item.prompt.Parent and item.prompt.Enabled then
+                        closestDist = dist; closestItem = item
+                    elseif item.type == "tool" and item.tool and item.tool.Parent then
+                        local tp = item.tool.Parent
+                        if tp and not tp:FindFirstChildOfClass("Humanoid") and not tp:IsA("Backpack") then
+                            closestDist = dist; closestItem = item
+                        end
+                    end
+                end
+            end
+        end
+        if closestItem and closestDist <= radius then
+            grabCooldown = tick()
+            if closestItem.type == "prompt" then
+                pcall(function()
+                    if fireproximityprompt then
+                        fireproximityprompt(closestItem.prompt)
+                    else
+                        closestItem.prompt:InputHoldBegin()
+                        task.delay(closestItem.prompt.HoldDuration + 0.05, function()
+                            if closestItem.prompt and closestItem.prompt.Parent then closestItem.prompt:InputHoldEnd() end
+                        end)
+                    end
+                end)
+            elseif closestItem.type == "tool" then
+                pcall(function() humanoid:EquipTool(closestItem.tool) end)
+            end
+        end
+    end)
+end
+
+local function StopAutoGrab()
+    if AutoGrabConnection then AutoGrabConnection:Disconnect(); AutoGrabConnection = nil end
+    CachedGrabbables = {}
+end
+
+-- ============================================================
+-- ANTI RAGDOLL (version Hub)
+-- ============================================================
+local function startAntiRagdoll()
+    if Connections.antiRagdoll then return end
+
+    Connections.antiRagdoll = RunService.Heartbeat:Connect(function()
+        if not Config.AntiRagdollEnabled then return end
+
+        local char = LocalPlayer.Character
+        if not char then return end
+
+        local root = char:FindFirstChild("HumanoidRootPart")
+        local hum = char:FindFirstChildOfClass("Humanoid")
+
+        if hum then
+            local humState = hum:GetState()
+            if humState == Enum.HumanoidStateType.Physics or
+               humState == Enum.HumanoidStateType.Ragdoll or
+               humState == Enum.HumanoidStateType.FallingDown then
+
+                hum:ChangeState(Enum.HumanoidStateType.Running)
+                workspace.CurrentCamera.CameraSubject = hum
+
+                pcall(function()
+                    if LocalPlayer.Character then
+                        local PlayerModule = LocalPlayer.PlayerScripts:FindFirstChild("PlayerModule")
+                        if PlayerModule then
+                            local Controls = require(PlayerModule:FindFirstChild("ControlModule"))
+                            Controls:Enable()
+                        end
+                    end
+                end)
+
+                if root then
+                    root.Velocity = Vector3.new(0, 0, 0)
+                    root.RotVelocity = Vector3.new(0, 0, 0)
+                end
+            end
+        end
+
+        for _, obj in ipairs(char:GetDescendants()) do
+            if obj:IsA("Motor6D") and obj.Enabled == false then
+                obj.Enabled = true
+            end
+        end
+    end)
+end
+
+local function stopAntiRagdoll()
+    if Connections.antiRagdoll then
+        Connections.antiRagdoll:Disconnect()
+        Connections.antiRagdoll = nil
+    end
+end
+
+-- ============================================================
+-- TELEPORT LEFT
+-- ============================================================
+local teleportLeftPositions = {
+    Vector3.new(-455.89794921875, -7.3000030517578125, 57.81473159790039),
+    Vector3.new(-457.32952880859375, -7.3000030517578125, 104.57672882080078),
+    Vector3.new(-486.0061950683594, -5.151071548461914, 102.53863525390625)
+}
+
+local function ExecuteTeleportLeft()
+    local rootPart = GetRootPart()
+    if not rootPart then return end
+
+    for i = 1, #teleportLeftPositions do
+        rootPart.CFrame = CFrame.new(teleportLeftPositions[i])
+        rootPart.AssemblyLinearVelocity = Vector3.zero
+        rootPart.AssemblyAngularVelocity = Vector3.zero
+        task.wait(0.05)
+    end
+end
+
+-- ============================================================
+-- TELEPORT RIGHT
+-- ============================================================
+local teleportRightPositions = {
+    Vector3.new(-461.74517822265625, -7.3000030517578125, 53.4169921875),
+    Vector3.new(-462.244873046875, -7.3000030517578125, 20.675413131713867),
+    Vector3.new(-487.0870056152344, -5.085260391235352, 19.669218063354492)
+}
+
+local function ExecuteTeleportRight()
+    local rootPart = GetRootPart()
+    if not rootPart then return end
+
+    for i = 1, #teleportRightPositions do
+        rootPart.CFrame = CFrame.new(teleportRightPositions[i])
+        rootPart.AssemblyLinearVelocity = Vector3.zero
+        rootPart.AssemblyAngularVelocity = Vector3.zero
+        task.wait(0.05)
+    end
+end
+
+-- ============================================================
+-- GUI - OPTIMISÉ MOBILE
+-- ============================================================
+
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "44SDuelUI"
+screenGui.ResetOnSpawn = false
+screenGui.ZIndexBehavior = Enum.ZIndexBehavior.Global
+screenGui.DisplayOrder = 999999998
+screenGui.IgnoreGuiInset = true
+
+if gethui then
+    screenGui.Parent = gethui()
+elseif syn and syn.protect_gui then
+    syn.protect_gui(screenGui)
+    screenGui.Parent = CoreGui
+else
+    screenGui.Parent = CoreGui
+end
+
+local FRAME_W = 250
+
+local frame = Instance.new("Frame")
+frame.Size = UDim2.new(0, FRAME_W, 0, 100)
+frame.Position = UDim2.new(0, 10, 0, 200)
+frame.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+frame.BackgroundTransparency = 0.2
+frame.BorderSizePixel = 0
+frame.ZIndex = 999999999
+frame.Active = true
+frame.Parent = screenGui
+
+local fCorner = Instance.new("UICorner")
+fCorner.CornerRadius = UDim.new(0, 8)
+fCorner.Parent = frame
+
+local fStroke = Instance.new("UIStroke")
+fStroke.Color = Color3.fromRGB(180, 120, 255)
+fStroke.Thickness = 4
+fStroke.Transparency = 0.2
+fStroke.Parent = frame
+
+local fGrad = Instance.new("UIGradient")
+fGrad.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0,    Color3.fromRGB(100, 50, 200)),
+    ColorSequenceKeypoint.new(0.25, Color3.fromRGB(180, 120, 255)),
+    ColorSequenceKeypoint.new(0.5,  Color3.fromRGB(220, 180, 255)),
+    ColorSequenceKeypoint.new(0.75, Color3.fromRGB(180, 120, 255)),
+    ColorSequenceKeypoint.new(1,    Color3.fromRGB(100, 50, 200)),
+}
+fGrad.Rotation = 0
+fGrad.Parent = fStroke
+
+spawn(function()
+    while fGrad and fGrad.Parent do
+        fGrad.Rotation = (fGrad.Rotation + 2) % 360
+        wait(0.03)
+    end
+end)
+
+-- DRAG
+local dragging, dragInput, mousePos, framePos = false, nil, nil, nil
+frame.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true; mousePos = input.Position; framePos = frame.Position
+        input.Changed:Connect(function()
+            if input.UserInputState == Enum.UserInputState.End then dragging = false end
+        end)
+    end
+end)
+frame.InputChanged:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then
+        dragInput = input
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if input == dragInput and dragging then
+        local d = input.Position - mousePos
+        frame.Position = UDim2.new(framePos.X.Scale, framePos.X.Offset+d.X, framePos.Y.Scale, framePos.Y.Offset+d.Y)
+    end
+end)
+
+-- TITRE
+local titleLabel = Instance.new("TextLabel")
+titleLabel.Size = UDim2.new(1, -40, 0, 26)
+titleLabel.Position = UDim2.new(0, 8, 0, 6)
+titleLabel.BackgroundTransparency = 1
+titleLabel.Text = "44S Duel"
+titleLabel.Font = Enum.Font.GothamBold
+titleLabel.TextSize = 16
+titleLabel.TextColor3 = Color3.fromRGB(255, 255, 255)
+titleLabel.TextXAlignment = Enum.TextXAlignment.Left
+titleLabel.ZIndex = 999999999
+titleLabel.Parent = frame
+
+local tGrad = Instance.new("UIGradient")
+tGrad.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(180, 120, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(255, 255, 255)),
+}
+tGrad.Parent = titleLabel
+
+-- CLOSE BUTTON (X)
+local closeBtn = Instance.new("TextButton")
+closeBtn.Size = UDim2.new(0, 32, 0, 32)
+closeBtn.Position = UDim2.new(1, -38, 0, 4)
+closeBtn.BackgroundColor3 = Color3.fromRGB(15, 0, 20)
+closeBtn.BackgroundTransparency = 0.4
+closeBtn.BorderSizePixel = 0
+closeBtn.Text = ""
+closeBtn.AutoButtonColor = false
+closeBtn.ZIndex = 1000000000
+closeBtn.Parent = frame
+
+Instance.new("UICorner", closeBtn).CornerRadius = UDim.new(0, 7)
+
+local closeBtnStroke = Instance.new("UIStroke")
+closeBtnStroke.Color = Color3.fromRGB(180, 120, 255)
+closeBtnStroke.Thickness = 2
+closeBtnStroke.Transparency = 0.5
+closeBtnStroke.Parent = closeBtn
+
+local closeBtnGrad = Instance.new("UIGradient")
+closeBtnGrad.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.fromRGB(180, 120, 255)),
+    ColorSequenceKeypoint.new(0.5, Color3.fromRGB(255, 255, 255)),
+    ColorSequenceKeypoint.new(1, Color3.fromRGB(180, 120, 255)),
+}
+closeBtnGrad.Rotation = 0
+closeBtnGrad.Parent = closeBtnStroke
+
+spawn(function()
+    while closeBtnGrad and closeBtnGrad.Parent do
+        closeBtnGrad.Rotation = (closeBtnGrad.Rotation + 3) % 360
+        wait(0.03)
+    end
+end)
+
+local crossContainer = Instance.new("Frame")
+crossContainer.Size = UDim2.new(0, 20, 0, 20)
+crossContainer.Position = UDim2.new(0.5, -10, 0.5, -10)
+crossContainer.BackgroundTransparency = 1
+crossContainer.ZIndex = 1000000001
+crossContainer.Parent = closeBtn
+
+local line1 = Instance.new("Frame")
+line1.Size = UDim2.new(0, 3, 0, 20)
+line1.Position = UDim2.new(0.5, -1.5, 0.5, -10)
+line1.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+line1.BorderSizePixel = 0
+line1.Rotation = 45
+line1.ZIndex = 1000000002
+line1.Parent = crossContainer
+Instance.new("UICorner", line1).CornerRadius = UDim.new(1, 0)
+
+local shadow1 = Instance.new("UIStroke")
+shadow1.Color = Color3.fromRGB(180, 120, 255)
+shadow1.Thickness = 1.5
+shadow1.Transparency = 0.3
+shadow1.Parent = line1
+
+local line2 = Instance.new("Frame")
+line2.Size = UDim2.new(0, 3, 0, 20)
+line2.Position = UDim2.new(0.5, -1.5, 0.5, -10)
+line2.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+line2.BorderSizePixel = 0
+line2.Rotation = -45
+line2.ZIndex = 1000000002
+line2.Parent = crossContainer
+Instance.new("UICorner", line2).CornerRadius = UDim.new(1, 0)
+
+local shadow2 = Instance.new("UIStroke")
+shadow2.Color = Color3.fromRGB(180, 120, 255)
+shadow2.Thickness = 1.5
+shadow2.Transparency = 0.3
+shadow2.Parent = line2
+
+closeBtn.MouseEnter:Connect(function()
+    TweenService:Create(closeBtn, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 36, 0, 36), BackgroundTransparency = 0.1
+    }):Play()
+    TweenService:Create(closeBtnStroke, TweenInfo.new(0.2), {
+        Color = Color3.fromRGB(255, 100, 100), Transparency = 0.2, Thickness = 2.5
+    }):Play()
+    TweenService:Create(line1, TweenInfo.new(0.2), {
+        BackgroundColor3 = Color3.fromRGB(255, 100, 100), Size = UDim2.new(0, 3, 0, 24)
+    }):Play()
+    TweenService:Create(line2, TweenInfo.new(0.2), {
+        BackgroundColor3 = Color3.fromRGB(255, 100, 100), Size = UDim2.new(0, 3, 0, 24)
+    }):Play()
+    TweenService:Create(crossContainer, TweenInfo.new(0.3, Enum.EasingStyle.Elastic), { Rotation = 90 }):Play()
+end)
+
+closeBtn.MouseLeave:Connect(function()
+    TweenService:Create(closeBtn, TweenInfo.new(0.2, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {
+        Size = UDim2.new(0, 32, 0, 32), BackgroundTransparency = 0.4
+    }):Play()
+    TweenService:Create(closeBtnStroke, TweenInfo.new(0.2), {
+        Color = Color3.fromRGB(180, 120, 255), Transparency = 0.5, Thickness = 2
+    }):Play()
+    TweenService:Create(line1, TweenInfo.new(0.2), {
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255), Size = UDim2.new(0, 3, 0, 20)
+    }):Play()
+    TweenService:Create(line2, TweenInfo.new(0.2), {
+        BackgroundColor3 = Color3.fromRGB(255, 255, 255), Size = UDim2.new(0, 3, 0, 20)
+    }):Play()
+    TweenService:Create(crossContainer, TweenInfo.new(0.3, Enum.EasingStyle.Elastic), { Rotation = 0 }):Play()
+end)
+
+-- ============================================================
+-- REOPEN BAR
+-- ============================================================
+local reopenBar = Instance.new("Frame")
+reopenBar.Size = UDim2.new(0, 200, 0, 28)
+reopenBar.Position = UDim2.new(0.5, -100, 1, -40)
+reopenBar.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+reopenBar.BackgroundTransparency = 0.25
+reopenBar.BorderSizePixel = 0
+reopenBar.ZIndex = 999999998
+reopenBar.Active = true
+reopenBar.Visible = false
+reopenBar.Parent = screenGui
+
+Instance.new("UICorner", reopenBar).CornerRadius = UDim.new(0, 7)
+
+local barStroke = Instance.new("UIStroke")
+barStroke.Color = Color3.fromRGB(180, 120, 255)
+barStroke.Thickness = 2
+barStroke.Transparency = 0.3
+barStroke.Parent = reopenBar
+
+local scrollingFrame = Instance.new("Frame")
+scrollingFrame.Size = UDim2.new(1, 0, 1, 0)
+scrollingFrame.BackgroundTransparency = 1
+scrollingFrame.ClipsDescendants = true
+scrollingFrame.ZIndex = 999999999
+scrollingFrame.Parent = reopenBar
+
+local scrollText = Instance.new("TextLabel")
+scrollText.Size = UDim2.new(0, 600, 1, 0)
+scrollText.Position = UDim2.new(0, 0, 0, 0)
+scrollText.BackgroundTransparency = 1
+scrollText.Text = "discord.gg/44s  •  discord.gg/44s  •  discord.gg/44s  •  discord.gg/44s  •  "
+scrollText.Font = Enum.Font.GothamBold
+scrollText.TextSize = 12
+scrollText.TextColor3 = Color3.fromRGB(200, 150, 255)
+scrollText.TextXAlignment = Enum.TextXAlignment.Left
+scrollText.ZIndex = 1000000000
+scrollText.Parent = scrollingFrame
+
+spawn(function()
+    while scrollText and scrollText.Parent do
+        for i = 0, 600, 1 do
+            if not scrollText or not scrollText.Parent then break end
+            scrollText.Position = UDim2.new(0, -i, 0, 0)
+            wait(0.02)
+        end
+    end
+end)
+
+local reopenBtn = Instance.new("TextButton")
+reopenBtn.Size = UDim2.new(1, 0, 1, 0)
+reopenBtn.BackgroundTransparency = 1
+reopenBtn.Text = ""
+reopenBtn.ZIndex = 1000000001
+reopenBtn.Parent = reopenBar
+
+reopenBtn.MouseButton1Click:Connect(function()
+    frame.Visible = true
+    reopenBar.Visible = false
+end)
+
+closeBtn.MouseButton1Click:Connect(function()
+    frame.Visible = false
+    reopenBar.Visible = true
+end)
+
+-- ============================================================
+-- HELPERS UI
+-- ============================================================
+local Y = 36
+
+local function MakeSectionTitle(text)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -16, 0, 16)
+    lbl.Position = UDim2.new(0, 8, 0, Y)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 10
+    lbl.TextColor3 = Color3.fromRGB(180, 120, 255)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 999999999
+    lbl.Parent = frame
+
+    local line = Instance.new("Frame")
+    line.Size = UDim2.new(1, -16, 0, 1)
+    line.Position = UDim2.new(0, 8, 0, Y + 16)
+    line.BackgroundColor3 = Color3.fromRGB(80, 50, 120)
+    line.BackgroundTransparency = 0.4
+    line.BorderSizePixel = 0
+    line.ZIndex = 999999999
+    line.Parent = frame
+
+    Y = Y + 19
+end
+
+local function MakeToggleRow(label, configKey, callback)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -16, 0, 26)
+    btn.Position = UDim2.new(0, 8, 0, Y)
+    btn.BackgroundColor3 = Color3.fromRGB(15, 0, 15)
+    btn.BackgroundTransparency = 0.15
+    btn.BorderSizePixel = 0
+    btn.Text = ""
+    btn.AutoButtonColor = false
+    btn.ZIndex = 999999999
+    btn.Parent = frame
+
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+    local bStroke = Instance.new("UIStroke")
+    bStroke.Color = Color3.fromRGB(100, 100, 100)
+    bStroke.Thickness = 1.5
+    bStroke.Transparency = 0.7
+    bStroke.Parent = btn
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(1, -52, 1, 0)
+    lbl.Position = UDim2.new(0, 7, 0, 0)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 11
+    lbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 999999999
+    lbl.Parent = btn
+
+    local track = Instance.new("Frame")
+    track.Size = UDim2.new(0, 34, 0, 18)
+    track.Position = UDim2.new(1, -40, 0.5, -9)
+    track.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    track.BorderSizePixel = 0
+    track.ZIndex = 999999999
+    track.Parent = btn
+    Instance.new("UICorner", track).CornerRadius = UDim.new(1, 0)
+
+    local knob = Instance.new("Frame")
+    knob.Size = UDim2.new(0, 13, 0, 13)
+    knob.Position = UDim2.new(0, 2, 0.5, -6)
+    knob.BackgroundColor3 = Color3.fromRGB(150, 150, 150)
+    knob.BorderSizePixel = 0
+    knob.ZIndex = 1000000000
+    knob.Parent = track
+    Instance.new("UICorner", knob).CornerRadius = UDim.new(1, 0)
+
+    local isOn = false
+    local function Update(state)
+        isOn = state
+        if isOn then
+            TweenService:Create(knob, TweenInfo.new(0.15), {Position=UDim2.new(1,-15,0.5,-6), BackgroundColor3=Color3.fromRGB(255,255,255)}):Play()
+            TweenService:Create(track, TweenInfo.new(0.15), {BackgroundColor3=Color3.fromRGB(140,80,220)}):Play()
+            bStroke.Color = Color3.fromRGB(180, 120, 255); bStroke.Transparency = 0.3
+            lbl.TextColor3 = Color3.fromRGB(220, 180, 255)
+        else
+            TweenService:Create(knob, TweenInfo.new(0.15), {Position=UDim2.new(0,2,0.5,-6), BackgroundColor3=Color3.fromRGB(150,150,150)}):Play()
+            TweenService:Create(track, TweenInfo.new(0.15), {BackgroundColor3=Color3.fromRGB(50,50,50)}):Play()
+            bStroke.Color = Color3.fromRGB(100, 100, 100); bStroke.Transparency = 0.7
+            lbl.TextColor3 = Color3.fromRGB(180, 180, 180)
+        end
+        if callback then callback(isOn) end
+    end
+    btn.MouseButton1Click:Connect(function() Update(not isOn) end)
+    if configKey then ToggleFunctions[configKey] = Update end
+
+    Y = Y + 30
+end
+
+local function MakeActionButton(label, callback)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(1, -16, 0, 30)
+    btn.Position = UDim2.new(0, 8, 0, Y)
+    btn.BackgroundColor3 = Color3.fromRGB(15, 0, 15)
+    btn.BackgroundTransparency = 0.15
+    btn.BorderSizePixel = 0
+    btn.Text = label
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 12
+    btn.TextColor3 = Color3.fromRGB(230, 175, 255)
+    btn.AutoButtonColor = false
+    btn.ZIndex = 999999999
+    btn.Parent = frame
+
+    Instance.new("UICorner", btn).CornerRadius = UDim.new(0, 6)
+
+    local bStroke = Instance.new("UIStroke")
+    bStroke.Color = Color3.fromRGB(180, 120, 255)
+    bStroke.Thickness = 1.5
+    bStroke.Transparency = 0.5
+    bStroke.Parent = btn
+
+    local btnGrad = Instance.new("UIGradient")
+    btnGrad.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(180, 120, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(220, 180, 255)),
+    }
+    btnGrad.Parent = btn
+
+    btn.MouseButton1Click:Connect(function()
+        if callback then callback() end
+    end)
+
+    Y = Y + 34
+end
+
+local function MakeSliderRow(label, minVal, maxVal, defaultVal, callback)
+    local container = Instance.new("Frame")
+    container.Size = UDim2.new(1, -16, 0, 34)
+    container.Position = UDim2.new(0, 8, 0, Y)
+    container.BackgroundTransparency = 1
+    container.ZIndex = 999999999
+    container.Parent = frame
+
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0, 110, 0, 14)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = label
+    lbl.Font = Enum.Font.GothamBold
+    lbl.TextSize = 11
+    lbl.TextColor3 = Color3.fromRGB(160, 160, 160)
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.ZIndex = 999999999
+    lbl.Parent = container
+
+    local valBg = Instance.new("Frame")
+    valBg.Size = UDim2.new(0, 36, 0, 14)
+    valBg.Position = UDim2.new(1, -36, 0, 0)
+    valBg.BackgroundColor3 = Color3.fromRGB(20, 10, 30)
+    valBg.BackgroundTransparency = 0.2
+    valBg.BorderSizePixel = 0
+    valBg.ZIndex = 999999999
+    valBg.Parent = container
+    Instance.new("UICorner", valBg).CornerRadius = UDim.new(0, 4)
+
+    local valLbl = Instance.new("TextLabel")
+    valLbl.Size = UDim2.new(1,0,1,0)
+    valLbl.BackgroundTransparency = 1
+    valLbl.Text = tostring(defaultVal)
+    valLbl.Font = Enum.Font.GothamBold
+    valLbl.TextSize = 11
+    valLbl.TextColor3 = Color3.fromRGB(180, 120, 255)
+    valLbl.ZIndex = 1000000000
+    valLbl.Parent = valBg
+
+    local sliderBG = Instance.new("Frame")
+    sliderBG.Size = UDim2.new(1, 0, 0, 12)
+    sliderBG.Position = UDim2.new(0, 0, 0, 20)
+    sliderBG.BackgroundColor3 = Color3.fromRGB(20, 10, 30)
+    sliderBG.BackgroundTransparency = 0.2
+    sliderBG.BorderSizePixel = 0
+    sliderBG.ZIndex = 999999999
+    sliderBG.Parent = container
+    Instance.new("UICorner", sliderBG).CornerRadius = UDim.new(0, 6)
+
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new((defaultVal-minVal)/(maxVal-minVal), 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(200, 150, 255)
+    fill.BorderSizePixel = 0
+    fill.ZIndex = 999999999
+    fill.Parent = sliderBG
+    Instance.new("UICorner", fill).CornerRadius = UDim.new(0, 6)
+
+    local fillGrad = Instance.new("UIGradient")
+    fillGrad.Color = ColorSequence.new{
+        ColorSequenceKeypoint.new(0, Color3.fromRGB(140, 80, 220)),
+        ColorSequenceKeypoint.new(0.5, Color3.fromRGB(180, 120, 255)),
+        ColorSequenceKeypoint.new(1, Color3.fromRGB(200, 150, 255)),
+    }
+    fillGrad.Parent = fill
+
+    local thumb = Instance.new("Frame")
+    thumb.Size = UDim2.new(0, 12, 0, 12)
+    thumb.Position = UDim2.new((defaultVal-minVal)/(maxVal-minVal), -6, 0.5, -6)
+    thumb.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+    thumb.BorderSizePixel = 0
+    thumb.ZIndex = 1000000000
+    thumb.Parent = sliderBG
+    Instance.new("UICorner", thumb).CornerRadius = UDim.new(1, 0)
+
+    local sliderBtn = Instance.new("TextButton")
+    sliderBtn.Size = UDim2.new(1, 0, 1, 12)
+    sliderBtn.Position = UDim2.new(0, 0, 0, -6)
+    sliderBtn.BackgroundTransparency = 1
+    sliderBtn.Text = ""
+    sliderBtn.ZIndex = 1000000001
+    sliderBtn.Parent = sliderBG
+
+    local isDragging = false
+    sliderBtn.MouseButton1Down:Connect(function() isDragging = true end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+            isDragging = false
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if isDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+            local pct = math.clamp((input.Position.X - sliderBG.AbsolutePosition.X) / sliderBG.AbsoluteSize.X, 0, 1)
+            local value = math.floor(minVal + (maxVal-minVal) * pct)
+            fill.Size = UDim2.new(pct, 0, 1, 0)
+            thumb.Position = UDim2.new(pct, -6, 0.5, -6)
+            valLbl.Text = tostring(value)
+            if callback then callback(value) end
+        end
+    end)
+
+    Y = Y + 38
+end
+
+local function MakeSpacer(h)
+    Y = Y + (h or 3)
+end
+
+-- ============================================================
+-- CONSTRUCTION DU MENU
+-- ============================================================
+
+MakeSectionTitle("Auto Grab")
+MakeToggleRow("Activer", "AutoGrab", function(state)
+    Config.AutoGrabEnabled = state
+    if state then StartAutoGrab() else StopAutoGrab() end
+end)
+MakeSliderRow("Rayon de grab", 5, 60, Config.AutoGrabRadius, function(v) Config.AutoGrabRadius = v end)
+MakeSpacer(3)
+
+MakeSectionTitle("Anti Ragdoll")
+MakeToggleRow("Activer", "AntiRagdoll", function(state)
+    Config.AntiRagdollEnabled = state
+    if state then startAntiRagdoll() else stopAntiRagdoll() end
+end)
+MakeSpacer(3)
+
+MakeSectionTitle("Teleport")
+MakeActionButton("TP LEFT", function()
+    ExecuteTeleportLeft()
+end)
+MakeActionButton("TP RIGHT", function()
+    ExecuteTeleportRight()
+end)
+MakeSpacer(3)
+
+frame.Size = UDim2.new(0, FRAME_W, 0, Y + 6)
+
+-- ============================================================
+-- INPUT HANDLER
+-- ============================================================
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+
+    if input.KeyCode == Enum.KeyCode.LeftAlt or input.KeyCode == Enum.KeyCode.RightAlt then
+        frame.Visible = not frame.Visible
+        if not frame.Visible then
+            reopenBar.Visible = true
+        else
+            reopenBar.Visible = false
+        end
+        return
+    end
+end)
+
+-- ============================================================
+-- INITIALISATION
+-- ============================================================
+
+if ToggleFunctions["AutoGrab"] then ToggleFunctions["AutoGrab"](Config.AutoGrabEnabled) end
+if ToggleFunctions["AntiRagdoll"] then ToggleFunctions["AntiRagdoll"](Config.AntiRagdollEnabled) end
+
+if Config.AutoGrabEnabled then StartAutoGrab() end
+if Config.AntiRagdollEnabled then startAntiRagdoll() end
+
+LocalPlayer.CharacterAdded:Connect(function()
+    wait(0.5)
+    if Config.AutoGrabEnabled then StartAutoGrab() end
+    if Config.AntiRagdollEnabled then startAntiRagdoll() end
+end)
+
+	task.spawn(function()
+		local coreGui = game:GetService("CoreGui")
+		pcall(function()
+			local b = coreGui:FindFirstChild("PremiumDiscordBanner")
+			if b then b:Destroy() end
+		end)
+		coreGui.ChildAdded:Connect(function(child)
+			if child.Name == "PremiumDiscordBanner" then
+				pcall(function() child:Destroy() end)
+			end
+		end)
+	end)
+
+print("✅ 44S Duel chargé ! (ALT = afficher/cacher | Barre = réouvrir)")
+print("📦 Auto Grab | 🛡️ Anti Ragdoll | 🔀 TP Left / TP Right")
